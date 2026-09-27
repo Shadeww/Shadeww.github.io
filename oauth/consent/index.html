@@ -1,0 +1,161 @@
+<!doctype html>
+<!--
+  صفحة الدخول والموافقة لموصّل MCP الأونلاين (supabase/functions/mcp).
+
+  **لماذا خارج Supabase**: الدوال الحدّية على النطاق الافتراضي تحوّل كل HTML
+  إلى نصٍّ صِرف (حمايةٌ من التصيّد)، فالصفحة ملفٌّ ثابت على استضافة مجانية.
+  وعنوانها = Site URL + Authorization Path في إعدادات OAuth Server بلوحة Supabase.
+
+  التدفّق: المساعد (Claude، ChatGPT…) يفتح /auth/v1/oauth/authorize ← Supabase يحوّل إلى هنا بـ
+  ?authorization_id=… ← دخولٌ بالبريد وكلمة المرور إن لم تكن جلسة ← عرض من يطلب
+  الوصول ← موافقة/رفض ← Supabase يعيد رابط العودة إلى المساعد.
+
+  المفتاح هنا **العام** (publishable) — هو نفسه في التطبيقات، ومصمَّم للعميل.
+-->
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ربط الموصّل — بيانات المدرسة</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f3f5f9; --card: #ffffff; --text: #1d2433; --muted: #5d6679;
+    --blue: #1565c0; --blue-dark: #0d47a1; --border: #d9deea; --danger: #c62828;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+    font-family: 'Cairo', system-ui, sans-serif; display: flex; flex-direction: column;
+  }
+  header { background: var(--blue); color: #fff; padding: 14px 16px; font-weight: 700; font-size: 18px; }
+  main { flex: 1; display: flex; align-items: flex-start; justify-content: center; padding: 24px 16px; }
+  .card {
+    width: 100%; max-width: 420px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px;
+  }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  p { color: var(--muted); line-height: 1.7; margin: 0 0 12px; }
+  label { display: block; font-weight: 600; margin: 12px 0 4px; }
+  input {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+    font: inherit; direction: ltr; text-align: right;
+  }
+  .row { display: flex; gap: 8px; margin-top: 18px; }
+  button {
+    flex: 1; padding: 11px; border-radius: 8px; border: 1px solid var(--blue);
+    font: inherit; font-weight: 700; cursor: pointer; background: var(--blue); color: #fff;
+  }
+  button:hover { background: var(--blue-dark); }
+  button.secondary { background: transparent; color: var(--blue); }
+  button:disabled { opacity: .6; cursor: default; }
+  .error { color: var(--danger); margin-top: 12px; min-height: 1.5em; }
+  .who { background: var(--bg); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+  ul { margin: 0 0 12px; padding-inline-start: 20px; color: var(--muted); line-height: 1.8; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<header>بيانات المدرسة</header>
+<main>
+  <div class="card">
+    <div id="loading"><p>جارٍ التحميل…</p></div>
+
+    <form id="login" class="hidden">
+      <h1>تسجيل الدخول</h1>
+      <p>ادخل بحسابك في تطبيقات المدرسة لربط الموصّل.</p>
+      <label for="email">البريد</label>
+      <input id="email" type="email" autocomplete="username" required>
+      <label for="password">كلمة المرور</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+      <div class="row"><button type="submit">دخول</button></div>
+    </form>
+
+    <div id="consent" class="hidden">
+      <h1>طلب وصول</h1>
+      <div class="who" id="who"></div>
+      <p><strong id="client"></strong> يطلب الوصول إلى بيانات المدرسة بحسابك:</p>
+      <ul>
+        <li>يقرأ ما تراه في تطبيقك — لا أكثر.</li>
+        <li>القراءة وحدها: لا يُنشئ شيئًا ولا يعدّله ولا يرسل لأحد.</li>
+      </ul>
+      <div class="row">
+        <button id="approve">موافقة</button>
+        <button id="deny" class="secondary">رفض</button>
+      </div>
+      <div class="row"><button id="switch" class="secondary">الدخول بحساب آخر</button></div>
+    </div>
+
+    <div id="error" class="error"></div>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script>
+  const SUPABASE_URL = 'https://wftweztztmrsvezfrtjn.supabase.co';
+  const PUBLISHABLE_KEY = 'sb_publishable_DGzU1Gv2NmCmgL-g2G4HAg_lXtXm_b4';
+  const sb = supabase.createClient(SUPABASE_URL, PUBLISHABLE_KEY);
+
+  const $ = (id) => document.getElementById(id);
+  const show = (id) => {
+    for (const s of ['loading', 'login', 'consent']) $(s).classList.toggle('hidden', s !== id);
+  };
+  const fail = (m) => { $('error').textContent = m; };
+
+  const authorizationId = new URLSearchParams(location.search).get('authorization_id');
+
+  async function start() {
+    fail('');
+    if (!authorizationId) {
+      show('loading');
+      $('loading').innerHTML = '<p>هذه الصفحة تُفتح من المساعد (Claude أو ChatGPT) عند ربط الموصّل، لا مباشرةً.</p>';
+      return;
+    }
+    const { data: { user } } = await sb.auth.getUser();
+    if (!user) { show('login'); return; }
+
+    const { data, error } = await sb.auth.oauth.getAuthorizationDetails(authorizationId);
+    if (error) { show('loading'); fail('تعذّر قراءة الطلب: ' + error.message); return; }
+    // وافق عليه سابقًا ⇒ رابط العودة مباشرةً.
+    if (data.redirect_url) { location.href = data.redirect_url; return; }
+
+    $('who').textContent = 'بحساب: ' + (data.user?.email || user.email);
+    $('client').textContent = data.client?.name || data.client?.client_name || 'تطبيق';
+    show('consent');
+  }
+
+  $('login').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    fail('');
+    const btn = e.submitter; btn.disabled = true;
+    const { error } = await sb.auth.signInWithPassword({
+      email: $('email').value.trim(),
+      password: $('password').value,
+    });
+    btn.disabled = false;
+    if (error) { fail('بيانات الدخول غير صحيحة'); return; }
+    start();
+  });
+
+  async function decide(approve) {
+    fail('');
+    $('approve').disabled = $('deny').disabled = true;
+    const { data, error } = approve
+      ? await sb.auth.oauth.approveAuthorization(authorizationId)
+      : await sb.auth.oauth.denyAuthorization(authorizationId);
+    if (error) {
+      $('approve').disabled = $('deny').disabled = false;
+      fail('تعذّر إتمام الطلب: ' + error.message);
+      return;
+    }
+    location.href = data.redirect_url;
+  }
+  $('approve').addEventListener('click', () => decide(true));
+  $('deny').addEventListener('click', () => decide(false));
+  $('switch').addEventListener('click', async () => { await sb.auth.signOut(); start(); });
+
+  start();
+</script>
+</body>
+</html>
